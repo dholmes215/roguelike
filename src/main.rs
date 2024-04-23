@@ -1,8 +1,10 @@
 use rand::Rng;
 use std::cmp;
+use std::default::Default;
 use tcod::colors;
 use tcod::colors::*;
 use tcod::console::*;
+use tcod::input::{self, Event, Key, Mouse};
 use tcod::map::FovAlgorithm;
 use tcod::map::Map as FovMap;
 
@@ -61,6 +63,8 @@ struct Tcod {
     con: Offscreen,
     panel: Offscreen,
     fov: FovMap,
+    key: Key,
+    mouse: Mouse,
 }
 
 struct Messages {
@@ -521,14 +525,26 @@ enum PlayerAction {
     Exit,
 }
 
+fn get_names_under_mouse(mouse: Mouse, objects: &[Object], fov_map: &FovMap) -> String {
+    let (x, y) = (mouse.cx as i32, mouse.cy as i32);
+
+    // create a list with names of all objects at the mouse's coordinates and in FOV
+    let names = objects
+        .iter()
+        .filter(|obj| obj.pos() == (x, y) && fov_map.is_in_fov(obj.x, obj.y))
+        .map(|obj| obj.name.clone())
+        .collect::<Vec<_>>();
+
+    names.join(", ") // join the names, separated by commas
+}
+
 fn handle_keys(tcod: &mut Tcod, game: &mut Game, objects: &mut [Object]) -> PlayerAction {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
     use PlayerAction::*;
 
-    let key = tcod.root.wait_for_keypress(true);
     let player_alive = objects[PLAYER].alive;
-    match (key, key.text(), player_alive) {
+    match (tcod.key, tcod.key.text(), player_alive) {
         // movement keys
         (Key { code: Up, .. }, _, _) => {
             player_move_or_attack(0, -1, game, objects);
@@ -686,6 +702,16 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
         tcod.panel.print_rect(MSG_X, y, MSG_WIDTH, 0, msg);
     }
 
+    // display names of objects under the mouse
+    tcod.panel.set_default_foreground(LIGHT_GREY);
+    tcod.panel.print_ex(
+        1,
+        0,
+        BackgroundFlag::None,
+        TextAlignment::Left,
+        get_names_under_mouse(tcod.mouse, objects, &tcod.fov),
+    );
+
     blit(
         &tcod.panel,
         (0, 0),
@@ -710,6 +736,8 @@ fn main() {
         con: Offscreen::new(MAP_WIDTH, MAP_HEIGHT),
         panel: Offscreen::new(SCREEN_WIDTH, PANEL_HEIGHT),
         fov: FovMap::new(MAP_WIDTH, MAP_HEIGHT),
+        key: Default::default(),
+        mouse: Default::default(),
     };
 
     tcod::system::set_fps(LIMIT_FPS);
@@ -754,6 +782,15 @@ fn main() {
 
     while !tcod.root.window_closed() {
         tcod.con.clear();
+
+        tcod.key = Default::default();
+        tcod.mouse = Default::default();
+
+        match input::check_for_event(input::MOUSE | input::KEY_PRESS) {
+            Some((_, Event::Mouse(m))) => tcod.mouse = m,
+            Some((_, Event::Key(k))) => tcod.key = k,
+            _ => {},
+        }
 
         // render the screen
         let fov_recompute = previous_player_position != (objects[PLAYER].x, objects[PLAYER].y);
