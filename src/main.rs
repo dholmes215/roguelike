@@ -33,6 +33,7 @@ const ROOM_MIN_SIZE: i32 = 6;
 const MAX_ROOMS: i32 = 30;
 
 const MAX_ROOM_MONSTERS: i32 = 3;
+const MAX_ROOM_ITEMS: i32 = 2;
 
 const COLOR_DARK_WALL: Color = Color { r: 0, g: 0, b: 100 };
 const COLOR_LIGHT_WALL: Color = Color {
@@ -103,6 +104,11 @@ enum Ai {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+enum Item {
+    Heal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum DeathCallback {
     Player,
     Monster,
@@ -153,6 +159,7 @@ struct Object {
     alive: bool,
     fighter: Option<Fighter>,
     ai: Option<Ai>,
+    item: Option<Item>,
 }
 
 impl Object {
@@ -167,6 +174,7 @@ impl Object {
             alive: false,
             fighter: None,
             ai: None,
+            item: None,
         }
     }
 
@@ -305,6 +313,24 @@ fn player_move_or_attack(dx: i32, dy: i32, game: &mut Game, objects: &mut [Objec
     }
 }
 
+/// add to the player's inventory and remove from the map
+fn pick_item_up(object_id: usize, game: &mut Game, objects: &mut Vec<Object>) {
+    if game.inventory.len() >= 26 {
+        game.messages.add(
+            format!(
+                "Your inventory is full, cannot pick up {}.",
+                objects[object_id].name
+            ),
+            RED,
+        );
+    } else {
+        let item = objects.swap_remove(object_id);
+        game.messages
+            .add(format!("You picked up a {}!", item.name), GREEN);
+        game.inventory.push(item);
+    }
+}
+
 /// A tile of the map and its properties
 #[derive(Clone, Copy, Debug)]
 struct Tile {
@@ -336,6 +362,7 @@ type Map = Vec<Vec<Tile>>; // ugh
 struct Game {
     map: Map,
     messages: Messages,
+    inventory: Vec<Object>,
 }
 
 fn make_map(objects: &mut Vec<Object>) -> Map {
@@ -505,6 +532,23 @@ fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>) {
             objects.push(monster);
         }
     }
+
+    // choose random number of items
+    let num_items = rand::thread_rng().gen_range(0..(MAX_ROOM_ITEMS + 1));
+
+    for _ in 0..num_items {
+        // choose random spot for this item
+        let x = rand::thread_rng().gen_range((room.x1 + 1)..room.x2);
+        let y = rand::thread_rng().gen_range((room.y1 + 1)..room.y2);
+
+        // only place if the tile is not blocked
+        if !is_blocked(x, y, map, objects) {
+            // create a healing potion
+            let mut object = Object::new(x, y, '!', "healing potion", VIOLET, false);
+            object.item = Some(Item::Heal);
+            objects.push(object);
+        }
+    }
 }
 
 fn is_blocked(x: i32, y: i32, map: &Map, objects: &[Object]) -> bool {
@@ -538,7 +582,7 @@ fn get_names_under_mouse(mouse: Mouse, objects: &[Object], fov_map: &FovMap) -> 
     names.join(", ") // join the names, separated by commas
 }
 
-fn handle_keys(tcod: &mut Tcod, game: &mut Game, objects: &mut [Object]) -> PlayerAction {
+fn handle_keys(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) -> PlayerAction {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
     use PlayerAction::*;
@@ -561,6 +605,15 @@ fn handle_keys(tcod: &mut Tcod, game: &mut Game, objects: &mut [Object]) -> Play
         (Key { code: Right, .. }, _, _) => {
             player_move_or_attack(1, 0, game, objects);
             TookTurn
+        }
+
+        (Key { code: Text, .. }, "g", true) => {
+            // pick up an item
+            let item_id = objects.iter().position(|object| object.pos() == objects[PLAYER].pos() && object.item.is_some());
+            if let Some(item_id) = item_id {
+                pick_item_up(item_id, game, objects);
+            }
+            DidntTakeTurn
         }
 
         (
@@ -757,6 +810,7 @@ fn main() {
         // generate map (at this point it's not drawn to the screen)
         map: make_map(&mut objects),
         messages: Messages::new(),
+        inventory: vec![],
     };
 
     // a warm welcoming message!
@@ -789,7 +843,7 @@ fn main() {
         match input::check_for_event(input::MOUSE | input::KEY_PRESS) {
             Some((_, Event::Mouse(m))) => tcod.mouse = m,
             Some((_, Event::Key(k))) => tcod.key = k,
-            _ => {},
+            _ => {}
         }
 
         // render the screen
