@@ -436,8 +436,19 @@ fn target_monster(
     objects: &[Object],
     max_range: Option<f32>,
 ) -> Option<usize> {
-    // TODO
-    Option::None
+    loop {
+        match target_tile(tcod, game, objects, max_range) {
+            Some((x, y)) => {
+                // return the first clicked monster, otherwise continue looping
+                for (id, obj) in objects.iter().enumerate() {
+                    if obj.pos() == (x, y) && obj.fighter.is_some() && id != PLAYER {
+                        return Some(id);
+                    }
+                }
+            }
+            None => return None,
+        }
+    }
 }
 
 /// add to the player's inventory and remove from the map
@@ -544,9 +555,12 @@ fn cast_confuse(
     game: &mut Game,
     objects: &mut [Object],
 ) -> UseResult {
-    // find closest enemy in-range and confuse it
-    // let monster_id = target_monster(tcod, game, objects, Some(CONFUSE_RANGE as f32));
-    let monster_id = closest_monster(tcod, objects, CONFUSE_RANGE);
+    // ask the player for a target to confuse
+    game.messages.add(
+        "Left-click an enemy to confuse it, or right-click to cancel.",
+        LIGHT_CYAN,
+    );
+    let monster_id = target_monster(tcod, game, objects, Some(CONFUSE_RANGE as f32));
     if let Some(monster_id) = monster_id {
         let old_ai = objects[monster_id].ai.take().unwrap();
         // replace the monster's AI with a "confused" one; after
