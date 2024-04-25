@@ -925,7 +925,11 @@ fn menu<T: AsRef<str>>(header: &str, options: &[T], width: i32, root: &mut Root)
     );
 
     // calculate total height for the header (after auto-wrap) and one line per option
-    let header_height = root.get_height_rect(0, 0, width, SCREEN_HEIGHT, header);
+    let header_height = if header.is_empty() {
+        0
+    } else {
+        root.get_height_rect(0, 0, width, SCREEN_HEIGHT, header)
+    };
     let height = options.len() as i32 + header_height;
 
     // create an off-screen console that represents the menu's window
@@ -1261,10 +1265,13 @@ fn initialise_fov(tcod: &mut Tcod, map: &Map) {
             );
         }
     }
+
+    // unexplored areas start black (which is the default background color)
+    tcod.con.clear();
 }
 
 fn play_game(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) {
-// force FOV "recompute" first time through the game loop
+    // force FOV "recompute" first time through the game loop
     let mut previous_player_position = (-1, -1);
 
     while !tcod.root.window_closed() {
@@ -1302,6 +1309,50 @@ fn play_game(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) {
     }
 }
 
+fn main_menu(tcod: &mut Tcod) {
+    let img = tcod::image::Image::from_file("menu_background.png")
+        .ok()
+        .expect("Background image not found");
+
+    while !tcod.root.window_closed() {
+        // show the background image, at twice the regular console resolution
+        tcod::image::blit_2x(&img, (0, 0), (-1, -1), &mut tcod.root, (0, 0));
+
+        tcod.root.set_default_foreground(LIGHT_YELLOW);
+        tcod.root.print_ex(
+            SCREEN_WIDTH / 2,
+            SCREEN_HEIGHT / 2 - 4,
+            BackgroundFlag::None,
+            TextAlignment::Center,
+            "TOMBS OF THE ANCIENT KINGS",
+        );
+        tcod.root.print_ex(
+            SCREEN_WIDTH / 2,
+            SCREEN_HEIGHT - 2,
+            BackgroundFlag::None,
+            TextAlignment::Center,
+            "By Yours Truly",
+        );
+
+        // show options and wait for the player's choice
+        let choices = &["Play a new game", "Continue last game", "Quit"];
+        let choice = menu("", choices, 24, &mut tcod.root);
+
+        match choice {
+            Some(0) => {
+                // new game
+                let (mut game, mut objects) = new_game(tcod);
+                play_game(tcod, &mut game, &mut objects);
+            }
+            Some(2) => {
+                // quit
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
 fn main() {
     tcod::system::set_fps(LIMIT_FPS);
 
@@ -1321,6 +1372,5 @@ fn main() {
         mouse: Default::default(),
     };
 
-    let (mut game, mut objects) = new_game(&mut tcod);
-    play_game(&mut tcod, &mut game, &mut objects);
+    main_menu(&mut tcod);
 }
