@@ -4,7 +4,6 @@ use std::default::Default;
 use tcod::colors;
 use tcod::colors::*;
 use tcod::console::*;
-use tcod::input::KeyCode::Text;
 use tcod::input::{self, Event, Key, Mouse};
 use tcod::map::FovAlgorithm;
 use tcod::map::Map as FovMap;
@@ -404,7 +403,6 @@ fn target_tile(
     objects: &[Object],
     max_range: Option<f32>,
 ) -> Option<(i32, i32)> {
-    use tcod::input::KeyCode::Escape;
     loop {
         // render the screen. this erases the inventory and shows the names of
         // objects under the mouse.
@@ -999,7 +997,6 @@ fn inventory_menu(inventory: &[Object], header: &str, root: &mut Root) -> Option
 }
 
 fn handle_keys(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) -> PlayerAction {
-    use tcod::input::Key;
     use tcod::input::KeyCode::*;
     use PlayerAction::*;
 
@@ -1218,7 +1215,96 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
     );
 }
 
+fn new_game(tcod: &mut Tcod) -> (Game, Vec<Object>) {
+    // create object representing the player
+    let mut player = Object::new(0, 0, '@', "player", WHITE, true);
+    player.alive = true;
+    player.fighter = Some(Fighter {
+        max_hp: 30,
+        hp: 30,
+        defense: 2,
+        power: 5,
+        on_death: DeathCallback::Player,
+    });
+
+    // the list of objects with just the player
+    let mut objects = vec![player];
+
+    let mut game = Game {
+        // generate map (at this point it's not drawn to the screen)
+        map: make_map(&mut objects),
+        messages: Messages::new(),
+        inventory: vec![],
+    };
+
+    initialise_fov(tcod, &game.map);
+
+    // a warm welcoming message!
+    game.messages.add(
+        "Welcome stranger! Prepare to perish in the Tombs of the Ancient Kings.",
+        RED,
+    );
+
+    (game, objects)
+}
+
+fn initialise_fov(tcod: &mut Tcod, map: &Map) {
+    // create the FOV map, according to the generated map
+
+    for y in 0..MAP_HEIGHT {
+        for x in 0..MAP_WIDTH {
+            tcod.fov.set(
+                x,
+                y,
+                !map[x as usize][y as usize].block_sight,
+                !map[x as usize][y as usize].blocked,
+            );
+        }
+    }
+}
+
+fn play_game(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) {
+// force FOV "recompute" first time through the game loop
+    let mut previous_player_position = (-1, -1);
+
+    while !tcod.root.window_closed() {
+        tcod.con.clear();
+
+        tcod.key = Default::default();
+        tcod.mouse = Default::default();
+
+        match input::check_for_event(input::MOUSE | input::KEY_PRESS) {
+            Some((_, Event::Mouse(m))) => tcod.mouse = m,
+            Some((_, Event::Key(k))) => tcod.key = k,
+            _ => {}
+        }
+
+        // render the screen
+        let fov_recompute = previous_player_position != objects[PLAYER].pos();
+        render_all(tcod, game, &objects, fov_recompute);
+
+        tcod.root.flush();
+
+        previous_player_position = objects[PLAYER].pos();
+        let player_action = handle_keys(tcod, game, objects);
+        if player_action == PlayerAction::Exit {
+            break;
+        }
+
+        // let monsters take their turn
+        if objects[PLAYER].alive && player_action != PlayerAction::DidntTakeTurn {
+            for id in 0..objects.len() {
+                if objects[id].ai.is_some() {
+                    ai_take_turn(id, &tcod, game, objects);
+                }
+            }
+        }
+    }
+}
+
 fn main() {
+    tcod::system::set_fps(LIMIT_FPS);
+
     let root = Root::initializer()
         .font("arial10x10.png", FontLayout::Tcod)
         .font_type(FontType::Greyscale)
@@ -1235,79 +1321,6 @@ fn main() {
         mouse: Default::default(),
     };
 
-    tcod::system::set_fps(LIMIT_FPS);
-
-    let mut player = Object::new(0, 0, '@', "player", WHITE, true);
-    player.alive = true;
-    player.fighter = Some(Fighter {
-        max_hp: 30,
-        hp: 30,
-        defense: 2,
-        power: 5,
-        on_death: DeathCallback::Player,
-    });
-    let mut objects = vec![player];
-
-    let mut game = Game {
-        // generate map (at this point it's not drawn to the screen)
-        map: make_map(&mut objects),
-        messages: Messages::new(),
-        inventory: vec![],
-    };
-
-    // a warm welcoming message!
-    game.messages.add(
-        "Welcome stranger! Prepare to perish in the Tombs of the Ancient Kings.",
-        RED,
-    );
-
-    // populate the FOV map, according to the generated map
-    for y in 0..MAP_HEIGHT {
-        for x in 0..MAP_WIDTH {
-            tcod.fov.set(
-                x,
-                y,
-                !game.map[x as usize][y as usize].block_sight,
-                !game.map[x as usize][y as usize].blocked,
-            );
-        }
-    }
-
-    // force FOV "recompute" first time through the game loop
-    let mut previous_player_position = (-1, -1);
-
-    while !tcod.root.window_closed() {
-        tcod.con.clear();
-
-        tcod.key = Default::default();
-        tcod.mouse = Default::default();
-
-        match input::check_for_event(input::MOUSE | input::KEY_PRESS) {
-            Some((_, Event::Mouse(m))) => tcod.mouse = m,
-            Some((_, Event::Key(k))) => tcod.key = k,
-            _ => {}
-        }
-
-        // render the screen
-        let fov_recompute = previous_player_position != (objects[PLAYER].x, objects[PLAYER].y);
-        render_all(&mut tcod, &mut game, &objects, fov_recompute);
-
-        tcod.root.flush();
-
-        let player = &mut objects[PLAYER];
-        previous_player_position = (player.x, player.y);
-        let player_action = handle_keys(&mut tcod, &mut game, &mut objects);
-        if player_action == PlayerAction::Exit {
-            break;
-        }
-
-        // let monsters take their turn
-        if objects[PLAYER].alive && player_action != PlayerAction::DidntTakeTurn {
-            for id in 0..objects.len() {
-                if objects[id].ai.is_some() {
-                    ai_take_turn(id, &tcod, &mut game, &mut objects);
-                }
-            }
-        }
-    }
+    let (mut game, mut objects) = new_game(&mut tcod);
+    play_game(&mut tcod, &mut game, &mut objects);
 }
