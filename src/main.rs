@@ -567,7 +567,16 @@ fn pick_item_up(object_id: usize, game: &mut Game, objects: &mut Vec<Object>) {
         let item = objects.swap_remove(object_id);
         game.messages
             .add(format!("You picked up a {}!", item.name), GREEN);
+        let index = game.inventory.len();
+        let slot = item.equipment.map(|e| e.slot);
         game.inventory.push(item);
+
+        // automatically equip, if the corresponding equipment slot is unused
+        if let Some(slot) = slot {
+            if get_equipped_in_slot(slot, &game.inventory).is_none() {
+                game.inventory[index].equip(&mut game.messages);
+            }
+        }
     }
 }
 
@@ -608,6 +617,9 @@ fn use_item(inventory_id: usize, tcod: &mut Tcod, game: &mut Game, objects: &mut
 
 fn drop_item(inventory_id: usize, game: &mut Game, objects: &mut Vec<Object>) {
     let mut item = game.inventory.remove(inventory_id);
+    if item.equipment.is_some() {
+        item.dequip(&mut game.messages);
+    }
     item.set_pos(objects[PLAYER].x, objects[PLAYER].y);
     game.messages
         .add(format!("You dropped a {}.", item.name), YELLOW);
@@ -759,9 +771,26 @@ fn toggle_equipment(
     if equipment.equipped {
         game.inventory[inventory_id].dequip(&mut game.messages);
     } else {
+        // if the slot is already being used, dequip whatever is there first
+        if let Some(current) = get_equipped_in_slot(equipment.slot, &game.inventory) {
+            game.inventory[current].dequip(&mut game.messages);
+        }
         game.inventory[inventory_id].equip(&mut game.messages);
     }
     UseResult::UsedAndKept
+}
+
+fn get_equipped_in_slot(slot: Slot, inventory: &[Object]) -> Option<usize> {
+    for (inventory_id, item) in inventory.iter().enumerate() {
+        if item
+            .equipment
+            .as_ref()
+            .map_or(false, |e| e.equipped && e.slot == slot)
+        {
+            return Some(inventory_id);
+        }
+    }
+    None
 }
 
 fn level_up(tcod: &mut Tcod, game: &mut Game, objects: &mut [Object]) {
@@ -1133,7 +1162,13 @@ fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>, level: u32) {
         ),
         1000,
     ];
-    let item_choices = [Item::Heal, Item::Lightning, Item::Fireball, Item::Confuse, Item::Equipment];
+    let item_choices = [
+        Item::Heal,
+        Item::Lightning,
+        Item::Fireball,
+        Item::Confuse,
+        Item::Equipment,
+    ];
 
     // choose random number of items
     let num_items = rand::thread_rng().gen_range(0..(max_items + 1));
@@ -1296,7 +1331,18 @@ fn inventory_menu(inventory: &[Object], header: &str, root: &mut Root) -> Option
     let options = if inventory.len() == 0 {
         vec!["Inventory is empty.".into()]
     } else {
-        inventory.iter().map(|item| item.name.clone()).collect()
+        inventory
+            .iter()
+            .map(|item| {
+                // show additional information, in case it's equipped
+                match item.equipment {
+                    Some(equipment) if equipment.equipped => {
+                        format!("{} (on {})", item.name, equipment.slot)
+                    }
+                    _ => item.name.clone(),
+                }
+            })
+            .collect()
     };
 
     let inventory_index = menu(header, &options, INVENTORY_WIDTH, root);
