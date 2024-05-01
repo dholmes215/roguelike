@@ -557,14 +557,7 @@ fn target_tile(
     loop {
         // render the screen. this erases the inventory and shows the names of
         // objects under the mouse.
-        tcod.root.flush();
-        let event = input::check_for_event(input::KEY_PRESS | input::MOUSE).map(|e| e.1);
-        // FIXME: this is basically copy-pasted from elsewhere but with a bug
-        match event {
-            Some(Event::Mouse(m)) => tcod.mouse = m,
-            Some(Event::Key(k)) => tcod.key = k,
-            None => tcod.key = Default::default(),
-        }
+        process_event(tcod);
         render_all(tcod, game, objects, false);
 
         let (x, y) = (tcod.mouse.cx as i32, tcod.mouse.cy as i32);
@@ -1803,14 +1796,7 @@ fn play_game(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) {
     while !tcod.root.window_closed() {
         tcod.con.clear();
 
-        tcod.key = Default::default();
-        tcod.mouse = Default::default();
-
-        match input::check_for_event(input::MOUSE | input::KEY_PRESS) {
-            Some((_, Event::Mouse(m))) => tcod.mouse = m,
-            Some((_, Event::Key(k))) => tcod.key = k,
-            _ => {}
-        }
+        process_event(tcod);
 
         // render the screen
         let fov_recompute = previous_player_position != objects[PLAYER].pos();
@@ -1836,6 +1822,18 @@ fn play_game(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) {
                 }
             }
         }
+    }
+}
+
+/// Resets the last stored key/mouse event and replaces it with the next
+fn process_event(tcod: &mut Tcod) {
+    tcod.key = Default::default();
+    tcod.mouse = Default::default();
+
+    match input::check_for_event(input::MOUSE | input::KEY_PRESS) {
+        Some((_, Event::Mouse(m))) => tcod.mouse = m,
+        Some((_, Event::Key(k))) => tcod.key = k,
+        _ => {}
     }
 }
 
