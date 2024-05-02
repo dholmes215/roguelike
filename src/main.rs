@@ -1,4 +1,5 @@
-use rand::distributions::WeightedIndex;
+mod map;
+
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp;
@@ -6,12 +7,13 @@ use std::default::Default;
 use std::error::Error;
 use std::fs::File;
 use std::io::{Read, Write};
-use tcod::colors;
 use tcod::colors::*;
 use tcod::console::*;
 use tcod::input::{self, Event, Key, Mouse};
 use tcod::map::FovAlgorithm;
 use tcod::map::Map as FovMap;
+use map::Map;
+use crate::map::{is_blocked, MAP_HEIGHT, MAP_WIDTH};
 
 // actual size of the window
 const SCREEN_WIDTH: i32 = 80;
@@ -32,32 +34,6 @@ const CHARACTER_SCREEN_WIDTH: i32 = 30;
 
 const LIMIT_FPS: i32 = 20; // 20 frames-per-second maximum
 
-// size of the map
-const MAP_WIDTH: i32 = 80;
-const MAP_HEIGHT: i32 = 43;
-
-// parameters for dungeon generator
-const ROOM_MAX_SIZE: i32 = 10;
-const ROOM_MIN_SIZE: i32 = 6;
-const MAX_ROOMS: i32 = 30;
-
-const COLOR_DARK_WALL: Color = Color { r: 0, g: 0, b: 100 };
-const COLOR_LIGHT_WALL: Color = Color {
-    r: 130,
-    g: 110,
-    b: 50,
-};
-const COLOR_DARK_GROUND: Color = Color {
-    r: 50,
-    g: 50,
-    b: 100,
-};
-const COLOR_LIGHT_GROUND: Color = Color {
-    r: 200,
-    g: 180,
-    b: 50,
-};
-
 const FOV_ALGO: FovAlgorithm = FovAlgorithm::Basic; // default FOV algorithm
 const FOV_LIGHT_WALLS: bool = true; // light walls or not
 const TORCH_RADIUS: i32 = 10;
@@ -76,6 +52,23 @@ const FIREBALL_DAMAGE: i32 = 25;
 // experience and level-ups
 const LEVEL_UP_BASE: i32 = 200;
 const LEVEL_UP_FACTOR: i32 = 150;
+
+const COLOR_DARK_WALL: Color = Color { r: 0, g: 0, b: 100 };
+const COLOR_LIGHT_WALL: Color = Color {
+    r: 130,
+    g: 110,
+    b: 50,
+};
+const COLOR_DARK_GROUND: Color = Color {
+    r: 50,
+    g: 50,
+    b: 100,
+};
+const COLOR_LIGHT_GROUND: Color = Color {
+    r: 200,
+    g: 180,
+    b: 50,
+};
 
 // player will always be the first object
 const PLAYER: usize = 0;
@@ -505,8 +498,8 @@ fn ai_confused(
         // move in a random direction, and decrease the number of turns confused
         move_by(
             monster_id,
-            rand::thread_rng().gen_range(-1..2),
-            rand::thread_rng().gen_range(-1..2),
+            thread_rng().gen_range(-1..2),
+            thread_rng().gen_range(-1..2),
             &game.map,
             objects,
         );
@@ -932,381 +925,12 @@ impl Tile {
     }
 }
 
-type Map = Vec<Vec<Tile>>; // ugh
-
 #[derive(Serialize, Deserialize)]
 struct Game {
     map: Map,
     messages: Messages,
     inventory: Vec<Object>,
     dungeon_level: u32,
-}
-
-fn make_map(objects: &mut Vec<Object>, level: u32) -> Map {
-    // fill map with "blocked" tiles
-    let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
-
-    // player is the first element, remove everything else.
-    // NOTE: works only when the player is the first object!
-    assert_eq!(&objects[PLAYER] as *const _, &objects[0] as *const _);
-    objects.truncate(1);
-
-    let mut rooms = vec![];
-
-    for _ in 0..MAX_ROOMS {
-        // random width and height
-        let w = rand::thread_rng().gen_range(ROOM_MIN_SIZE..(ROOM_MAX_SIZE + 1));
-        let h = rand::thread_rng().gen_range(ROOM_MIN_SIZE..(ROOM_MAX_SIZE + 1));
-        // random position without going out of the boundaries of the map
-        let x = rand::thread_rng().gen_range(0..(MAP_WIDTH - w));
-        let y = rand::thread_rng().gen_range(0..(MAP_HEIGHT - h));
-
-        let new_room = Rect::new(x, y, w, h);
-
-        // run through the other rooms and see if they intersect with this one
-        let failed = rooms
-            .iter()
-            .any(|other_room| new_room.intersects_with(other_room));
-
-        if !failed {
-            // this means there are no intersections, so this room is valid
-
-            // "paint" it to the map's tiles
-            create_room(new_room, &mut map);
-
-            // add some content to this room, such as monsters
-            place_objects(new_room, &map, objects, level);
-
-            // center coordinates of the new room, will be useful later
-            let (new_x, new_y) = new_room.center();
-
-            if rooms.is_empty() {
-                // this is the first room, where the player starts at
-                objects[PLAYER].set_pos(new_x, new_y)
-            } else {
-                // all rooms after the first:
-                // connect it to the previous room with a tunnel
-
-                // center coordinates of the previous room
-                let (prev_x, prev_y) = rooms[rooms.len() - 1].center();
-
-                // toss a coin (random bool value -- either true or false)
-                if rand::random() {
-                    // first move horizontally, then vertically
-                    create_h_tunnel(prev_x, new_x, prev_y, &mut map);
-                    create_v_tunnel(prev_y, new_y, new_x, &mut map);
-                } else {
-                    create_v_tunnel(prev_y, new_y, prev_x, &mut map);
-                    create_h_tunnel(prev_x, new_x, new_y, &mut map);
-                }
-            }
-
-            // finally, append the new room to the list
-            rooms.push(new_room);
-        }
-    }
-
-    // create stairs at the center of the last room
-    let (last_room_x, last_room_y) = rooms[rooms.len() - 1].center();
-    let mut stairs = Object::new(last_room_x, last_room_y, '<', "stairs", WHITE, false);
-    stairs.always_visible = true;
-    objects.push(stairs);
-
-    map
-}
-
-/// A rectangle on the map, used to characterise a room.
-#[derive(Clone, Copy, Debug)]
-struct Rect {
-    x1: i32,
-    y1: i32,
-    x2: i32,
-    y2: i32,
-}
-
-impl Rect {
-    pub fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
-        Rect {
-            x1: x,
-            y1: y,
-            x2: x + w,
-            y2: y + h,
-        }
-    }
-
-    pub fn center(&self) -> (i32, i32) {
-        let center_x = (self.x1 + self.x2) / 2;
-        let center_y = (self.y1 + self.y2) / 2;
-        (center_x, center_y)
-    }
-
-    pub fn intersects_with(&self, other: &Rect) -> bool {
-        // returns true if this rectangle intersects with another one
-        (self.x1 <= other.x2)
-            && (self.x2 >= other.x1)
-            && (self.y1 <= other.y2)
-            && (self.y2 >= other.y1)
-    }
-}
-
-fn create_room(room: Rect, map: &mut Map) {
-    // go through the tiles in the rectangle and make them passable
-    for x in (room.x1 + 1)..room.x2 {
-        for y in (room.y1 + 1)..room.y2 {
-            map[x as usize][y as usize] = Tile::empty();
-        }
-    }
-}
-
-fn create_h_tunnel(x1: i32, x2: i32, y: i32, map: &mut Map) {
-    // horizontal tunnel. `min()` and `max()` are used in case `x1 > x2`
-    for x in cmp::min(x1, x2)..(cmp::max(x1, x2) + 1) {
-        map[x as usize][y as usize] = Tile::empty();
-    }
-}
-
-fn create_v_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
-    // vertical tunnel
-    for y in cmp::min(y1, y2)..(cmp::max(y1, y2) + 1) {
-        map[x as usize][y as usize] = Tile::empty();
-    }
-}
-
-struct Transition {
-    level: u32,
-    value: u32,
-}
-
-/// Returns a value that depends on level. The table specifies what
-/// value occurs after each level, default is 0.
-fn from_dungeon_level(table: &[Transition], level: u32) -> u32 {
-    table
-        .iter()
-        .rev()
-        .find(|transition| level >= transition.level)
-        .map_or(0, |transition| transition.value)
-}
-
-fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>, level: u32) {
-    // maximum number of monsters per room
-    let max_monsters = from_dungeon_level(
-        &[
-            Transition { level: 1, value: 2 },
-            Transition { level: 4, value: 3 },
-            Transition { level: 6, value: 5 },
-        ],
-        level,
-    );
-
-    // choose random number of monsters
-    let num_monsters = rand::thread_rng().gen_range(0..(max_monsters + 1));
-
-    // monster random table
-    let troll_chance = from_dungeon_level(
-        &[
-            Transition {
-                level: 3,
-                value: 15,
-            },
-            Transition {
-                level: 5,
-                value: 30,
-            },
-            Transition {
-                level: 7,
-                value: 60,
-            },
-        ],
-        level,
-    );
-
-    // monster random table
-    let monster_weights = [80, troll_chance];
-    let monster_choices = ["orc", "troll"];
-    let monster_dist = WeightedIndex::new(&monster_weights).unwrap();
-    let mut monster_rng = thread_rng();
-
-    for _ in 0..num_monsters {
-        // choose random spot for this monster
-        let x = rand::thread_rng().gen_range((room.x1 + 1)..room.x2);
-        let y = rand::thread_rng().gen_range((room.y1 + 1)..room.y2);
-
-        // only place it if the tile is not blocked
-        if !is_blocked(x, y, map, objects) {
-            let monster_choice = monster_choices[monster_rng.sample(&monster_dist)];
-            let mut monster = match monster_choice {
-                "orc" => {
-                    // create an orc
-                    let mut orc = Object::new(x, y, 'o', "orc", colors::DESATURATED_GREEN, true);
-                    orc.fighter = Some(Fighter {
-                        base_max_hp: 20,
-                        hp: 20,
-                        base_defense: 0,
-                        base_power: 4,
-                        xp: 35,
-                        on_death: DeathCallback::Monster,
-                    });
-                    orc.ai = Some(Ai::Basic);
-                    orc
-                }
-                "troll" => {
-                    let mut troll = Object::new(x, y, 'T', "troll", colors::DARKER_GREEN, true);
-                    troll.fighter = Some(Fighter {
-                        base_max_hp: 30,
-                        hp: 30,
-                        base_defense: 2,
-                        base_power: 8,
-                        xp: 100,
-                        on_death: DeathCallback::Monster,
-                    });
-                    troll.ai = Some(Ai::Basic);
-                    troll
-                }
-                _ => unreachable!(),
-            };
-
-            monster.alive = true;
-            objects.push(monster);
-        }
-    }
-
-    // maximum number of monsters per room
-    let max_items = from_dungeon_level(
-        &[
-            Transition { level: 1, value: 1 },
-            Transition { level: 4, value: 2 },
-        ],
-        level,
-    );
-
-    // item random table
-    let item_weights = [
-        35,
-        from_dungeon_level(
-            &[Transition {
-                level: 4,
-                value: 25,
-            }],
-            level,
-        ),
-        from_dungeon_level(
-            &[Transition {
-                level: 6,
-                value: 25,
-            }],
-            level,
-        ),
-        from_dungeon_level(
-            &[Transition {
-                level: 2,
-                value: 10,
-            }],
-            level,
-        ),
-        from_dungeon_level(&[Transition { level: 4, value: 5 }], level),
-        from_dungeon_level(
-            &[Transition {
-                level: 8,
-                value: 15,
-            }],
-            level,
-        ),
-    ];
-    let item_choices = [
-        Item::Heal,
-        Item::Lightning,
-        Item::Fireball,
-        Item::Confuse,
-        Item::Sword,
-        Item::Shield,
-    ];
-
-    // choose random number of items
-    let num_items = rand::thread_rng().gen_range(0..(max_items + 1));
-
-    // monster random table
-    let item_dist = WeightedIndex::new(&item_weights).unwrap();
-    let mut item_rng = thread_rng();
-
-    for _ in 0..num_items {
-        // choose random spot for this item
-        let x = rand::thread_rng().gen_range((room.x1 + 1)..room.x2);
-        let y = rand::thread_rng().gen_range((room.y1 + 1)..room.y2);
-
-        // only place if the tile is not blocked
-        if !is_blocked(x, y, map, objects) {
-            let item_choice = item_choices[item_rng.sample(&item_dist)];
-            let mut item = match item_choice {
-                Item::Heal => {
-                    // create a healing potion (70% chance)
-                    let mut object = Object::new(x, y, '!', "healing potion", VIOLET, false);
-                    object.item = Some(Item::Heal);
-                    object
-                }
-                Item::Lightning => {
-                    // create a lightning bolt scroll (30% chance)
-                    let mut object =
-                        Object::new(x, y, '#', "scroll of lightning bolt", LIGHT_YELLOW, false);
-                    object.item = Some(Item::Lightning);
-                    object
-                }
-                Item::Fireball => {
-                    // create a fireball scroll (10% chance)
-                    let mut object =
-                        Object::new(x, y, '#', "scroll of fireball", LIGHT_YELLOW, false);
-                    object.item = Some(Item::Fireball);
-                    object
-                }
-                Item::Confuse => {
-                    // create a confuse scroll (10% chance)
-                    let mut object =
-                        Object::new(x, y, '#', "scroll of confusion", LIGHT_YELLOW, false);
-                    object.item = Some(Item::Confuse);
-                    object
-                }
-                Item::Sword => {
-                    // create a sword
-                    let mut object = Object::new(x, y, '/', "sword", SKY, false);
-                    object.item = Some(Item::Sword);
-                    object.equipment = Some(Equipment {
-                        equipped: false,
-                        slot: Slot::RightHand,
-                        max_hp_bonus: 0,
-                        power_bonus: 3,
-                        defense_bonus: 0,
-                    });
-                    object
-                }
-                Item::Shield => {
-                    // create a sword
-                    let mut object = Object::new(x, y, '[', "shield", SKY, false);
-                    object.item = Some(Item::Shield);
-                    object.equipment = Some(Equipment {
-                        equipped: false,
-                        slot: Slot::LeftHand,
-                        max_hp_bonus: 0,
-                        power_bonus: 0,
-                        defense_bonus: 1,
-                    });
-                    object
-                }
-            };
-
-            item.always_visible = true;
-            objects.push(item);
-        }
-    }
-}
-
-fn is_blocked(x: i32, y: i32, map: &Map, objects: &[Object]) -> bool {
-    // first test the map tile
-    if map[x as usize][y as usize].blocked {
-        return true;
-    }
-    // now check for any blocking objects
-    objects
-        .iter()
-        .any(|object| object.blocks && object.pos() == (x, y))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1395,7 +1019,7 @@ fn menu<T: AsRef<str>>(header: &str, options: &[T], width: i32, root: &mut Root)
 
 fn inventory_menu(inventory: &[Object], header: &str, root: &mut Root) -> Option<usize> {
     // show a menu with each item of the inventory as an option
-    let options = if inventory.len() == 0 {
+    let options = if inventory.is_empty() {
         vec!["Inventory is empty.".into()]
     } else {
         inventory
@@ -1415,7 +1039,7 @@ fn inventory_menu(inventory: &[Object], header: &str, root: &mut Root) -> Option
     let inventory_index = menu(header, &options, INVENTORY_WIDTH, root);
 
     // if an item was chosen, return it
-    if inventory.len() > 0 {
+    if !inventory.is_empty() {
         inventory_index
     } else {
         None
@@ -1569,7 +1193,7 @@ fn next_level(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) {
         RED,
     );
     game.dungeon_level += 1;
-    game.map = make_map(objects, game.dungeon_level);
+    game.map = map::make_map(objects, game.dungeon_level);
     initialise_fov(tcod, &game.map);
 }
 
@@ -1616,6 +1240,33 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
             .compute_fov(player.x, player.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGO);
     }
 
+    render_objects_to_console(tcod, game, objects);
+    explore_and_render_map(tcod, game);
+
+    blit(
+        &tcod.con,
+        (0, 0),
+        (SCREEN_WIDTH, SCREEN_HEIGHT),
+        &mut tcod.root,
+        (0, 0),
+        1.0,
+        1.0,
+    );
+
+    render_panel(tcod, game, objects);
+
+    blit(
+        &tcod.panel,
+        (0, 0),
+        (SCREEN_WIDTH, PANEL_HEIGHT),
+        &mut tcod.root,
+        (0, PANEL_Y),
+        1.0,
+        1.0,
+    );
+}
+
+fn render_objects_to_console(tcod: &mut Tcod, game: &mut Game, objects: &[Object]) {
     let mut to_draw: Vec<_> = objects
         .iter()
         .filter(|o| {
@@ -1629,7 +1280,9 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
     for object in &to_draw {
         object.draw(&mut tcod.con);
     }
+}
 
+fn explore_and_render_map(tcod: &mut Tcod, game: &mut Game) {
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
             let visible = tcod.fov.is_in_fov(x, y);
@@ -1653,17 +1306,9 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
             }
         }
     }
+}
 
-    blit(
-        &tcod.con,
-        (0, 0),
-        (SCREEN_WIDTH, SCREEN_HEIGHT),
-        &mut tcod.root,
-        (0, 0),
-        1.0,
-        1.0,
-    );
-
+fn render_panel(tcod: &mut Tcod, game: &mut Game, objects: &[Object]) {
     // prepare to render the GUI panel
     tcod.panel.set_default_background(BLACK);
     tcod.panel.clear();
@@ -1712,16 +1357,6 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
         TextAlignment::Left,
         get_names_under_mouse(tcod.mouse, objects, &tcod.fov),
     );
-
-    blit(
-        &tcod.panel,
-        (0, 0),
-        (SCREEN_WIDTH, PANEL_HEIGHT),
-        &mut tcod.root,
-        (0, PANEL_Y),
-        1.0,
-        1.0,
-    );
 }
 
 fn new_game(tcod: &mut Tcod) -> (Game, Vec<Object>) {
@@ -1742,7 +1377,7 @@ fn new_game(tcod: &mut Tcod) -> (Game, Vec<Object>) {
 
     let mut game = Game {
         // generate map (at this point it's not drawn to the screen)
-        map: make_map(&mut objects, 1),
+        map: map::make_map(&mut objects, 1),
         messages: Messages::new(),
         inventory: vec![],
         dungeon_level: 1,
@@ -1800,7 +1435,7 @@ fn play_game(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) {
 
         // render the screen
         let fov_recompute = previous_player_position != objects[PLAYER].pos();
-        render_all(tcod, game, &objects, fov_recompute);
+        render_all(tcod, game, objects, fov_recompute);
 
         tcod.root.flush();
 
@@ -1818,7 +1453,7 @@ fn play_game(tcod: &mut Tcod, game: &mut Game, objects: &mut Vec<Object>) {
         if objects[PLAYER].alive && player_action != PlayerAction::DidntTakeTurn {
             for id in 0..objects.len() {
                 if objects[id].ai.is_some() {
-                    ai_take_turn(id, &tcod, game, objects);
+                    ai_take_turn(id, tcod, game, objects);
                 }
             }
         }
@@ -1838,8 +1473,7 @@ fn process_event(tcod: &mut Tcod) {
 }
 
 fn main_menu(tcod: &mut Tcod) {
-    let img = tcod::image::Image::from_file("menu_background.png")
-        .ok()
+    let img = Result::ok(tcod::image::Image::from_file("menu_background.png"))
         .expect("Background image not found");
 
     while !tcod.root.window_closed() {
